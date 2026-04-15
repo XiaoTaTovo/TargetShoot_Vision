@@ -54,7 +54,7 @@ def process_shapes(frame, mode):
     elif mode == 2:
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 1500 or area > 200000: continue 
+            if area < 1500 : continue 
                 
             epsilon = 0.02 * cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, epsilon, True)

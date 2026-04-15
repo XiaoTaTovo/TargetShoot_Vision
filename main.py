@@ -1,6 +1,13 @@
 import cv2
 from Target.shape_detect import process_shapes
 from Serial.communicate import SerialManager 
+def on_mouse_click(event, x, y, flags, param):
+    # 如果检测到鼠标左键按下
+    if event == cv2.EVENT_LBUTTONDOWN:
+        print("\n" + "="*40)
+        print(f"🎯 【激光笔校准】你点击的屏幕坐标是: X={x}, Y={y}")
+        print(f"🔧 请修改代码: CENTER_X = {x}, CENTER_Y = {y}")
+        print("="*40 + "\n")
 
 def main():
     # 1. 初始化摄像头和串口
@@ -14,13 +21,18 @@ def main():
     CENTER_Y = height // 2
     
     # 初始化串口 (注意改成你电脑上的实际 COM 口)
-    serial_manager = SerialManager(port='COM3', baudrate=115200)
+    serial_manager = SerialManager(port='COM5', baudrate=115200)
     
     # 初始模式设为 1 (任务1)
     current_mode = 1 
     # 当前正在打第几个目标索引号
     target_index = 0
     print(f"✅ 系统启动! 当前模式: {current_mode}。按 '1' 或 '2' 切换模式，按 'q' 退出。")
+    # ==========================================
+    # 🌟 新增：提前创建窗口，并绑定鼠标点击事件！
+    # ==========================================
+    cv2.namedWindow("Camera View (AI)")
+    cv2.setMouseCallback("Camera View (AI)", on_mouse_click)
 
     while True:
         ret, frame = cap.read()
