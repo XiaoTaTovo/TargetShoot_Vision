@@ -1,6 +1,8 @@
 import cv2
 from Target.shape_detect import process_shapes
+from Target.shape_detect import detect_laser
 from Serial.communicate import SerialManager 
+
 def on_mouse_click(event, x, y, flags, param):
     # 如果检测到鼠标左键按下
     if event == cv2.EVENT_LBUTTONDOWN:
@@ -41,6 +43,14 @@ def main():
         # 把当前的 mode 传给识别库
         results, display_frame, thresh = process_shapes(frame, current_mode)
         
+          # 在拿到 results 后，顺便去找激光点在哪！
+        laser_cx, laser_cy = detect_laser(frame)
+        
+        # 在画面上画个绿色的十字，告诉你 AI 看到激光点在哪了
+        if laser_cx is not None:
+            cv2.drawMarker(display_frame, (laser_cx, laser_cy), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
+
+        
         # 画出画面的绝对中心十字准星 (你的激光笔理想落点)
         cv2.line(display_frame, (CENTER_X - 10, CENTER_Y), (CENTER_X + 10, CENTER_Y), (0, 255, 255), 2)
         cv2.line(display_frame, (CENTER_X, CENTER_Y - 10), (CENTER_X, CENTER_Y + 10), (0, 255, 255), 2)
@@ -58,24 +68,26 @@ def main():
             except:
                 pass
 
+       
+      
+
         # ==========================================
         # 🚀 核心逻辑：计算误差并发送串口
         # ==========================================
         if len(results) > 0 and target_index < len(results):
-            
-            # 🌟 关键：打的是排序后的第 target_index 个目标！
             target = results[target_index]
             
-            err_x = target['cx'] - CENTER_X
-            err_y = target['cy'] - CENTER_Y
-            
-            serial_manager.send_gimbal_data(err_x, err_y, state=1)
-            
-            cv2.putText(display_frame, f"Target {target_index} | Err X:{err_x} Y:{err_y}", 
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
-            # 把当前锁定的目标画一个特殊的红圈，方便观察
-            cv2.circle(display_frame, (target['cx'], target['cy']), 15, (0, 0, 255), 3)
+            # 🌟 终极顿悟：不再减去画面中心，而是减去激光点当前的真实位置！
+            if laser_cx is not None and laser_cy is not None:
+                err_x = target['cx'] - laser_cx
+                err_y = target['cy'] - laser_cy
+                serial_manager.send_gimbal_data(err_x, err_y, state=1)
+                
+                cv2.putText(display_frame, f"Target {target_index} | Err X:{err_x} Y:{err_y}", 
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            else:
+                # 如果没找到激光点（比如被挡住了），先别瞎动
+                serial_manager.send_gimbal_data(0, 0, state=0)
             
         else:
             serial_manager.send_gimbal_data(0, 0, state=0)

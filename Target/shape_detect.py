@@ -1,5 +1,30 @@
 import cv2
 import numpy as np
+def detect_laser(frame):
+    # 将图像转为 HSV 色彩空间，因为红色在 HSV 中最容易提取
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # 红色在 HSV 中横跨 0~10 和 160~180 两个区域
+    lower_red1 = np.array([0, 100, 200])   # 最后一个 200 是亮度 (V)，激光很亮！
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([160, 100, 200])
+    upper_red2 = np.array([180, 255, 255])
+
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask = cv2.bitwise_or(mask1, mask2)
+
+    # 找红点的轮廓
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        # 找到面积最大的红斑（防止背景有红色小噪点）
+        c = max(contours, key=cv2.contourArea)
+        M = cv2.moments(c)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            return cx, cy
+    return None, None
 
 def process_shapes(frame, mode):
     """
