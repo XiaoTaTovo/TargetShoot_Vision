@@ -2,34 +2,27 @@ import cv2
 import numpy as np
 import math
 
-
-
-
-
-
-import cv2
-import numpy as np
-
 def detect_laser(frame):
     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
     
-    # 🌟 绝杀红墨水，放过红激光！
-    # S(饱和度)>80 过滤掉普通的白光干扰
-    # V(明度)>200 是核心！红墨水绝对达不到 200，只有激光能！
-    lower_red1 = np.array([0, 80, 200])   
+    # ==========================================
+    # 🌟 终极夜视仪：黑胶带吸光太严重，疯狂拉低 V (明度) 和 S (饱和度) 的下限！
+    # 只要背景够黑，V 降到 50 都不怕误识别！
+    # ==========================================
+    lower_red1 = np.array([0, 36, 111])   
     upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([160, 80, 200])
+    lower_red2 = np.array([160, 36, 111])
     upper_red2 = np.array([180, 255, 255])
 
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     laser_mask = cv2.bitwise_or(mask1, mask2)
 
-    # 🚨 拔掉“死胡同”里的钉子：彻底删除 MORPH_OPEN！
-    # 直接用膨胀 (Dilate)！哪怕只抓到了激光边缘的 1 颗红色像素，
-    # 也能瞬间把它放大成一颗饱满的星星！
-    kernel = np.ones((3, 3), np.uint8)
+    # ==========================================
+    # 🌟 暴力放大：换用 5x5 的大核，膨胀 1 次！把针尖大小的光点强行炸开！
+    # ==========================================
+    kernel = np.ones((5, 5), np.uint8)
     laser_mask = cv2.dilate(laser_mask, kernel, iterations=1)
     
     cv2.imshow("Laser Magic", laser_mask)
@@ -41,16 +34,16 @@ def detect_laser(frame):
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        # 放宽面积，极小的光点也能存活
-        if 1 < area < 800:
+        # 🌟 面积门槛降到 > 0！只要是个红光点存活下来了，哪怕 1 个像素我也认！
+        if area > 0:
             rect = cv2.minAreaRect(cnt)
             width, height = rect[1]
             if width == 0 or height == 0: continue
             
             aspect_ratio = max(width, height) / min(width, height)
             
-            # 放宽到 4.0，兼容斜着打靶产生的严重椭圆
-            if aspect_ratio <= 4.0:
+            # 放宽比例到 6.0，极其微弱的光斑容易被拉伸变形
+            if aspect_ratio <= 6.0:
                 if area > max_area:
                     max_area = area
                     M = cv2.moments(cnt)
@@ -61,15 +54,19 @@ def detect_laser(frame):
     return best_cx, best_cy
 
 
-# ... 后面的 process_shapes 不动 ...
-
 def process_shapes(frame, mode):
     display_frame = frame.copy()
     results = []
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blurred, 90, 255, cv2.THRESH_BINARY_INV)
+    
+    # 🌟 绝杀光线变化：引入 THRESH_OTSU 大津法！
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    
+    # 🌟 现场缝合术：把反光断裂的黑胶带重新黏合！
+    kernel_close = np.ones((7, 7), np.uint8) 
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close)
     
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -78,25 +75,30 @@ def process_shapes(frame, mode):
     # ==========================================
     if mode in [1, 4, 5]:
         max_area = 0
-        best_target = None
+        best_target_rect = None # 🌟 我们存矩形，不再存多边形
         
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 5000 or area > 100000: continue 
-                
-            epsilon = 0.02 * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            if area < 3000 or area > 150000: continue # 🌟 保护上限和下限，隔绝小图形和外界大阴影
             
-            if len(approx) == 4 and area > max_area:
-                max_area = area
-                best_target = approx
+            # 🚨 终极防弹衣：不再数 approx 有没有 4 个角！直接算外接矩形！
+            rect = cv2.minAreaRect(cnt)
+            w, h = rect[1]
+            if min(w, h) == 0: continue
+            
+            aspect_ratio = max(w, h) / min(w, h)
+            
+            # 🌟 只要长宽比像个框（0.8 到 2.5 之间），哪怕胶带贴得像狗啃的也认！
+            if 0.8 <= aspect_ratio <= 2.5:
+                if area > max_area:
+                    max_area = area
+                    best_target_rect = rect
                 
-        if best_target is not None:
-            rect = cv2.minAreaRect(best_target)
-            box = cv2.boxPoints(rect)
+        if best_target_rect is not None:
+            box = cv2.boxPoints(best_target_rect)
             box = np.int32(box) 
             
-            cx, cy = int(rect[0][0]), int(rect[0][1])
+            cx, cy = int(best_target_rect[0][0]), int(best_target_rect[0][1])
             
             cv2.drawContours(display_frame, [box], 0, (255, 0, 0), 2)
             cv2.circle(display_frame, (cx, cy), 5, (0, 0, 255), -1)
@@ -132,12 +134,13 @@ def process_shapes(frame, mode):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
 
     # ==========================================
-    # 🎯 模式 2 和 3 代码
+    # 🎯 模式 2 和 3 代码 (小图形专属)
     # ==========================================
     elif mode == 2 or mode == 3:
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 1500 : continue 
+            # 🌟 严格限制面积：下限 800 (防噪点)，上限 10000 (防A4纸和阴影)
+            if area < 800 or area > 10000: continue 
                 
             epsilon = 0.02 * cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, epsilon, True)
@@ -147,10 +150,13 @@ def process_shapes(frame, mode):
             
             circularity = (4 * np.pi * area) / (perimeter * perimeter)
             
-            if circularity > 0.78: shape_name, sort_key = "YuanXing", 0
-            elif vertices == 3: shape_name, sort_key = "SanJiao", 3
-            elif vertices == 4: shape_name, sort_key = "SiBian", 4
-            else: shape_name, sort_key = "Unknow", 99 
+            # ==========================================
+            # 🌟 赛题级排序逻辑：几条边就排第几！彻底解决十字星问题
+            # ==========================================
+            if circularity > 0.78: 
+                shape_name, sort_key = "YuanXing", 0  # 圆形排第一
+            else:
+                shape_name, sort_key = f"Shape_{vertices}", vertices # 三角(3) -> 正方(4) -> 十字(12)
 
             M = cv2.moments(cnt)
             if M["m00"] != 0:
@@ -159,6 +165,7 @@ def process_shapes(frame, mode):
                 results.append({'shape': shape_name, 'cx': cx, 'cy': cy, 'vertices': sort_key, 'contour': contour_points})
                 cv2.drawContours(display_frame, [approx], -1, (0, 255, 0), 2)
 
+        # 按边数升序排列，自动规划打靶路线！
         results = sorted(results, key=lambda x: x['vertices'])
 
     return results, display_frame, thresh
