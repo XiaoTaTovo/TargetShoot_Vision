@@ -6,25 +6,20 @@ def detect_laser(frame):
     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
     
+       
+    
     # ==========================================
-    # 🌟 终极夜视仪：黑胶带吸光太严重，疯狂拉低 V (明度) 和 S (饱和度) 的下限！
-    # 只要背景够黑，V 降到 50 都不怕误识别！
+    # 🟢 绿光终极过滤 (红光跨越了0和180，绿光不需要，所以极其简单！)
     # ==========================================
-    lower_red1 = np.array([0, 36, 111])   
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([160, 36, 111])
-    upper_red2 = np.array([180, 255, 255])
+    lower_green = np.array([35, 50, 100])  
+    upper_green = np.array([85, 255, 255])
 
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    laser_mask = cv2.bitwise_or(mask1, mask2)
+    laser_mask = cv2.inRange(hsv, lower_green, upper_green)
 
-    # ==========================================
-    # 🌟 暴力放大：换用 5x5 的大核，膨胀 1 次！把针尖大小的光点强行炸开！
-    # ==========================================
+    # 暴力放大：换用 5x5 的大核，膨胀 1 次！
     kernel = np.ones((5, 5), np.uint8)
     laser_mask = cv2.dilate(laser_mask, kernel, iterations=1)
-    
+
     cv2.imshow("Laser Magic", laser_mask)
 
     contours, _ = cv2.findContours(laser_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
