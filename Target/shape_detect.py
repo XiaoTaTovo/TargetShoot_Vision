@@ -6,13 +6,11 @@ def detect_laser(frame):
     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
     
-       
-    
     # ==========================================
-    # 🟢 绿光终极过滤 (红光跨越了0和180，绿光不需要，所以极其简单！)
+    # 🟢 绿光终极过滤
     # ==========================================
-    lower_green = np.array([35, 50, 100])  
-    upper_green = np.array([85, 255, 255])
+    lower_green = np.array([35, 10, 150])  
+    upper_green = np.array([90, 255, 255])
 
     laser_mask = cv2.inRange(hsv, lower_green, upper_green)
 
@@ -29,7 +27,7 @@ def detect_laser(frame):
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        # 🌟 面积门槛降到 > 0！只要是个红光点存活下来了，哪怕 1 个像素我也认！
+        # 🌟 面积门槛降到 > 0！哪怕 1 个像素也认！
         if area > 0:
             rect = cv2.minAreaRect(cnt)
             width, height = rect[1]
@@ -59,8 +57,13 @@ def process_shapes(frame, mode):
     # 🌟 绝杀光线变化：引入 THRESH_OTSU 大津法！
     _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
     
-    # 🌟 现场缝合术：把反光断裂的黑胶带重新黏合！
-    kernel_close = np.ones((7, 7), np.uint8) 
+    if mode in [1, 4, 5]:
+        # 模式 1,4,5 (找大黑框)：胶带反光严重，用 9x9 粗针线强行融合裂缝！
+        kernel_close = np.ones((9, 9), np.uint8) 
+    else:
+        # 模式 2,3 (找小图形)：需要保住尖角和直角，用 3x3 细针线！
+        kernel_close = np.ones((3, 3), np.uint8)
+
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close)
     
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -70,24 +73,26 @@ def process_shapes(frame, mode):
     # ==========================================
     if mode in [1, 4, 5]:
         max_area = 0
-        best_target_rect = None # 🌟 我们存矩形，不再存多边形
+        best_target_rect = None 
         
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 3000 or area > 150000: continue # 🌟 保护上限和下限，隔绝小图形和外界大阴影
+            if area < 3000 or area > 150000: continue # 保护上限和下限
             
-            # 🚨 终极防弹衣：不再数 approx 有没有 4 个角！直接算外接矩形！
+            # 🚨 终极防弹衣：算外接矩形
             rect = cv2.minAreaRect(cnt)
             w, h = rect[1]
             if min(w, h) == 0: continue
             
             aspect_ratio = max(w, h) / min(w, h)
             
-            # 🌟 只要长宽比像个框（0.8 到 2.5 之间），哪怕胶带贴得像狗啃的也认！
+            # 只要长宽比像个框（0.8 到 2.5 之间）
             if 0.8 <= aspect_ratio <= 2.5:
-                if area > max_area:
-                    max_area = area
-                    best_target_rect = rect
+                extent = area / (w * h)
+                if extent > 0.85: # 面积占比至少 85%，极大概率是完整的 A4 黑框
+                    if area > max_area:
+                        max_area = area
+                        best_target_rect = rect
                 
         if best_target_rect is not None:
             box = cv2.boxPoints(best_target_rect)
@@ -134,33 +139,54 @@ def process_shapes(frame, mode):
     elif mode == 2 or mode == 3:
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # 🌟 严格限制面积：下限 800 (防噪点)，上限 10000 (防A4纸和阴影)
             if area < 800 or area > 10000: continue 
                 
-            epsilon = 0.02 * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            vertices = len(approx)
+            # 🌟 1. 粗略相亲：用 0.02 的美颜滤镜，先看清它是几边形！
+            epsilon_rough = 0.02 * cv2.arcLength(cnt, True)
+            approx_rough = cv2.approxPolyDP(cnt, epsilon_rough, True)
+            vertices = len(approx_rough)
+            
             perimeter = cv2.arcLength(cnt, True)
             if perimeter == 0: continue
             
             circularity = (4 * np.pi * area) / (perimeter * perimeter)
             
-            # ==========================================
-            # 🌟 赛题级排序逻辑：几条边就排第几！彻底解决十字星问题
-            # ==========================================
             if circularity > 0.78: 
-                shape_name, sort_key = "YuanXing", 0  # 圆形排第一
+                shape_name, sort_key = "YuanXing", 0  
             else:
-                shape_name, sort_key = f"Shape_{vertices}", vertices # 三角(3) -> 正方(4) -> 十字(12)
+                shape_name, sort_key = f"Shape_{vertices}", vertices
 
-            M = cv2.moments(cnt)
-            if M["m00"] != 0:
-                cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                contour_points = approx if mode == 3 else []
-                results.append({'shape': shape_name, 'cx': cx, 'cy': cy, 'vertices': sort_key, 'contour': contour_points})
-                cv2.drawContours(display_frame, [approx], -1, (0, 255, 0), 2)
+            # 使用极其抗畸变的外接矩形中心法 (抛弃受畸变影响的重心法)
+            rect = cv2.minAreaRect(cnt)
+            cx = int(rect[0][0])
+            cy = int(rect[0][1])
+            
+            # ==========================================
+            # 🌟🌟 2. 终极修复：因材施教，动态分配描边画质！🌟🌟
+            # ==========================================
+            if mode == 3:
+                if shape_name == "YuanXing":
+                    contour_points = approx_rough
+                elif vertices > 6:
+                    # 复杂图形（十字12边、星星10边）
+                    # 必须用 4K显微镜画质 (0.004)！死死保住每一个内凹角和直角！
+                    epsilon_hd = 0.004 * cv2.arcLength(cnt, True)
+                    contour_points = cv2.approxPolyDP(cnt, epsilon_hd, True)
+                else:
+                    # 简单图形（正方4边、三角3边）
+                    # 胶带边缘太烂，直接沿用美颜后的 approx_rough (0.02)！
+                    # 算法会自动无视掉左下角的刺和右下角的缺角，强制生成极度完美的 4 个角！
+                    contour_points = approx_rough
+            else:
+                contour_points = []
 
-        # 按边数升序排列，自动规划打靶路线！
+            results.append({'shape': shape_name, 'cx': cx, 'cy': cy, 'vertices': sort_key, 'contour': contour_points})
+            
+            # 画框显示：用最终决定的那个轮廓画
+            draw_target = contour_points if mode == 3 and len(contour_points) > 0 else approx_rough
+            cv2.drawContours(display_frame, [draw_target], -1, (0, 255, 0), 2)
+
+        # 按边数升序排列
         results = sorted(results, key=lambda x: x['vertices'])
 
     return results, display_frame, thresh

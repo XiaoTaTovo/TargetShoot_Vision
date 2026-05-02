@@ -1,4 +1,5 @@
 import cv2
+import math
 from Target.shape_detect import process_shapes, detect_laser
 from Serial.communicate import SerialManager 
 
@@ -124,66 +125,110 @@ def main():
                 if current_mode == 2 and target_index > 0:
                     cv2.putText(display_frame, "MISSION 2 COMPLETED!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
 
-        elif current_mode == 3: # 模式3：吃豆人
+        elif current_mode == 3: # 模式3：吃豆人 (太极柔和版)
             current_target_name = "Tracing Mode"
             if len(results) > 0 and target_index < len(results):
                 target = results[target_index]
+                
+                # ==========================================
+                # 🌟 1. 让胡萝卜走得更慢、更密！(降速 50%)
+                # ==========================================
                 if len(trace_points) == 0 and 'contour' in target and len(target['contour']) > 0:
-                    vertices = target['contour']
                     trace_points = []
-                    for i in range(len(vertices)):
-                        pt1 = vertices[i][0]
-                        pt2 = vertices[(i+1) % len(vertices)][0] 
-                        for j in range(30):
-                            x = int(pt1[0] + (pt2[0] - pt1[0]) * (j / 30.0))
-                            y = int(pt1[1] + (pt2[1] - pt1[1]) * (j / 30.0))
+                    
+                    if target['shape'] == 'YuanXing':
+                        cx, cy = target['cx'], target['cy']
+                        area = cv2.contourArea(target['contour'])
+                        radius = int((area / 3.14159) ** 0.5)
+                        # 【修改】：把 120 个点变成 240 个点！速度直接慢一倍，极其细腻！
+                        for i in range(240):
+                            angle = i * (2 * 3.14159 / 240)
+                            x = int(cx + radius * math.cos(angle))
+                            y = int(cy + radius * math.sin(angle))
                             trace_points.append((x, y))
+                    else:
+                        vertices = target['contour']
+                        for i in range(len(vertices)):
+                            pt1 = vertices[i][0]
+                            pt2 = vertices[(i+1) % len(vertices)][0] 
+                            dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
+                            # 【修改】：把 dist / 2.0 变成 dist / 1.0 (每 1 个像素插 1 个点，降速一倍！)
+                            steps = max(int(dist / 1.0), 5) 
+                            for j in range(steps):
+                                x = int(pt1[0] + (pt2[0] - pt1[0]) * (j / float(steps)))
+                                y = int(pt1[1] + (pt2[1] - pt1[1]) * (j / float(steps)))
+                                trace_points.append((x, y))
+                            # 👇👇👇 史诗级修复：拐角防切角“停车”逻辑 👇👇👇
+                            # 在每一条边走完、到达顶点（pt2）的时候，
+                            # 我们强行往数组里塞 30 个完全一样的顶点坐标！
+                            # 意味着黄点到达拐角后，会原地停滞 30 帧（大约 1 秒钟）！
+                            # 逼着云台把惯性消耗掉，死死砸进直角顶点！
+                            for _ in range(30):
+                                trace_points.append((int(pt2[0]), int(pt2[1])))
                     current_trace_idx = 0
 
+                # ==========================================
+                # 🌟 2. 云台软化与防卡死追踪
+                # ==========================================
                 if laser_cx is not None and laser_cy is not None and current_trace_idx < len(trace_points):
-                    goal_x, goal_y = trace_points[current_trace_idx]
+                    
+                    lookahead_steps = 3 # 预判量稍微拉大，因为点变密了
+                    target_idx = min(current_trace_idx + lookahead_steps, len(trace_points) - 1)
+                    goal_x, goal_y = trace_points[target_idx]
+                    
                     err_x = goal_x - laser_cx
                     err_y = goal_y - laser_cy
                     
                     last_laser_cx, last_laser_cy = laser_cx, laser_cy 
                     last_err_x, last_err_y = err_x, err_y
                     lost_counter = 0
-                    
                     display_err_x, display_err_y = err_x, err_y
-                    serial_manager.send_gimbal_data(err_x, err_y, state=1)
                     
+                    # 🌟🌟🌟【终极大招：软件级 PID 软化】🌟🌟🌟
+                    # 不改单片机代码！直接在 Python 里把误差打 6 折！
+                    # 这样云台收到的小误差，就会表现得极其温柔丝滑，绝不超调！
+                    soft_err_x = err_x * 0.85
+                    soft_err_y = err_y * 0.85
+                    serial_manager.send_gimbal_data(soft_err_x, soft_err_y, state=1)
+                    
+                    # 画图
                     for i, p in enumerate(trace_points):
                         if i < current_trace_idx:
-                            cv2.circle(display_frame, p, 2, (100, 100, 100), -1)
+                            cv2.circle(display_frame, p, 1, (100, 100, 100), -1)
                         elif i == current_trace_idx:
-                            cv2.circle(display_frame, p, 6, (0, 255, 255), -1)
+                            cv2.circle(display_frame, p, 5, (0, 255, 255), -1)
                             cv2.line(display_frame, (laser_cx, laser_cy), p, (0, 255, 255), 1)
-                        else:
-                            cv2.circle(display_frame, p, 2, (255, 255, 255), -1)
                     
-                    if (err_x**2 + err_y**2) ** 0.5 < 15.0:
+                    current_dist = math.hypot(err_x, err_y)
+                    
+                    # 【修改】：把距离放宽到 35！只要没掉队太远，就一直往前走，消除“一卡一卡”的停顿感
+                    if current_dist < 20.0:
                         current_trace_idx += 1 
-                        if current_trace_idx >= len(trace_points):
-                            trace_points = [] 
-                            target_index += 1
-                else:
-                    if lost_counter < 60 and current_trace_idx < len(trace_points):
+                        
+                    if current_trace_idx >= len(trace_points):
+                        trace_points = [] 
+                        target_index += 1
+                        
+                else: 
+                    # ... 盲开逻辑保持你原来的不变 ...
+                    if lost_counter < 30 and current_trace_idx < len(trace_points):
                         lost_counter += 1
-                        if lost_counter % 2 == 0:
+                        if lost_counter % 3 == 0:
                             current_trace_idx += 1 
                             if current_trace_idx >= len(trace_points):
                                 trace_points = []
                                 target_index += 1
-                                
                         if current_trace_idx < len(trace_points):
                             goal_x, goal_y = trace_points[current_trace_idx]
                             fake_err_x = goal_x - last_laser_cx
                             fake_err_y = goal_y - last_laser_cy
-                            fake_err_x = max(-80, min(80, fake_err_x))
-                            fake_err_y = max(-80, min(80, fake_err_y))
+                            fake_err_x = max(-60, min(60, fake_err_x))
+                            fake_err_y = max(-60, min(60, fake_err_y))
                             display_err_x, display_err_y = fake_err_x, fake_err_y
-                            cv2.putText(display_frame, "GHOST PULLING POWER MAX!", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                            serial_manager.send_gimbal_data(fake_err_x, fake_err_y, state=1)
+                            cv2.putText(display_frame, "BLIND PULLING!", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                            
+                            # 盲开也打 6 折
+                            serial_manager.send_gimbal_data(fake_err_x * 0.6, fake_err_y * 0.6, state=1)
                         else:
                             serial_manager.send_gimbal_data(0, 0, state=0)
                     else:
