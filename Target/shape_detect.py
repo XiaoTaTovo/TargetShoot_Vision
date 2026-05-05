@@ -6,18 +6,10 @@ def detect_laser(frame):
     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
     
-    # ==========================================
-    # 🌟 终极夜视仪：黑胶带吸光太严重，疯狂拉低 V (明度) 和 S (饱和度) 的下限！
-    # 只要背景够黑，V 降到 50 都不怕误识别！
-    # ==========================================
-    lower_red1 = np.array([0, 36, 111])   
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([160, 36, 111])
-    upper_red2 = np.array([180, 255, 255])
-
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    laser_mask = cv2.bitwise_or(mask1, mask2)
+    lower_green = np.array([35,10,150])
+    upper_green = np.array([90,255,255])
+    
+    laser_mask = cv2.inRange(hsv, lower_green, upper_green)
 
     # ==========================================
     # 🌟 暴力放大：换用 5x5 的大核，膨胀 1 次！把针尖大小的光点强行炸开！
