@@ -26,10 +26,9 @@ def main():
     last_laser_cx, last_laser_cy = 0, 0 
     lost_counter = 0  
     
-    # 🌟 新增：轨迹点更新计时器（核心降频机制）
     trace_update_counter = 0
     
-    print("✅ 单曝光脱机实战 【降维稳定版】 启动！\n👉 请使用物理按键进行模式切换！")
+    print("✅ 单曝光脱机实战 【拐角动态降速版】 启动！\n👉 请使用物理按键进行模式切换！")
 
     while True:
         ret, frame = cap.read()
@@ -60,7 +59,7 @@ def main():
                             smooth_tx, smooth_ty = 0, 0 
                             trace_points = []
                             lost_counter = 0 
-                            trace_update_counter = 0 # 切模式时清零
+                            trace_update_counter = 0 
                             last_err_x, last_err_y = 0.0, 0.0
                             print(f"🔄 收到单片机指令，切换至模式: {current_mode}")
                 except: pass
@@ -69,7 +68,7 @@ def main():
             target_index = 0 
 
         # ==========================================
-        # 🎯 任务 1, 2, 4, 5 逻辑 (静态+动态)
+        # 🎯 任务 1, 2, 4, 5 逻辑 
         # ==========================================
         if current_mode in [1, 2, 4, 5]:
             if len(results) > 0 and target_index < len(results):
@@ -99,27 +98,26 @@ def main():
                 serial_manager.send_gimbal_data(0, 0, state=0)
 
         # ==========================================
-        # 🎯 任务 3 逻辑 (降维打击版：大颗粒 + 低频更新 + 死等)
+        # 🎯 任务 3 逻辑 (拐角平滑过渡版)
         # ==========================================
         elif current_mode == 3: 
             current_target_name = "Tracing Mode"
             if len(results) > 0 and target_index < len(results):
                 target = results[target_index]
                 
-                # --- 1. 生成轨迹 (大颗粒度) ---
+                # --- 1. 生成轨迹 ---
                 if len(trace_points) == 0 and 'contour' in target and len(target['contour']) > 0:
                     trace_points = []
                     cx, cy = target['cx'], target['cy']
                     
-                    # 🌟 减弱内缩：0.85 改为 0.9，刚刚好卡在胶带边缘偏内
-                    shrink_ratio = 0.9 
+                    shrink_ratio = 0.90 # 内缩比例保持
                     
                     if target['shape'] == 'YuanXing':
                         area = cv2.contourArea(target['contour'])
                         radius = int(((area / 3.14159) ** 0.5) * shrink_ratio)
                         
-                        # 保持画 450 度，防漏画
-                        for i in range(90):
+                        # 🌟 优化1：改回 72 份！不多画图形，正常闭环！
+                        for i in range(72):
                             angle = i * (2 * 3.14159 / 72)
                             x = int(cx + radius * math.cos(angle))
                             y = int(cy + radius * math.sin(angle))
@@ -128,7 +126,6 @@ def main():
                     else:
                         vertices = target['contour']
                         
-                        # 左上角起步不变
                         pts = [p[0] for p in vertices]
                         start_idx = np.argmin([p[0] + p[1] for p in pts])
                         vertices = np.roll(vertices, -start_idx, axis=0)
@@ -140,7 +137,6 @@ def main():
                             new_y = int(cy + (vy - cy) * shrink_ratio)
                             shrunk_vertices.append([[new_x, new_y]])
                             
-                        # 闭合防漏
                         if len(shrunk_vertices) >= 2:
                             shrunk_vertices.append(shrunk_vertices[0])
                             shrunk_vertices.append(shrunk_vertices[1])
@@ -150,22 +146,21 @@ def main():
                             pt2 = shrunk_vertices[i+1][0] 
                             dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
                             
-                            # 🌟 轨迹极度稀疏化：dist/8，让舵机有充足时间反应！
-                            steps = max(int(dist / 8.0), 2) 
+                            # 🌟 优化2：切点密度恢复到中等颗粒度 (dist/5.0)
+                            steps = max(int(dist / 5.0), 3) 
                             for j in range(steps):
                                 x = int(pt1[0] + (pt2[0] - pt1[0]) * (j / float(steps)))
                                 y = int(pt1[1] + (pt2[1] - pt1[1]) * (j / float(steps)))
                                 trace_points.append((x, y))
                                 
                     current_trace_idx = 0
-                    trace_update_counter = 0 # 重置计数器
+                    trace_update_counter = 0 
                     
-                # --- 2. 追踪逻辑 (最笨，但也最稳) ---
+                # --- 2. 追踪逻辑 (带拐角动态计算) ---
                 if laser_cx is not None and laser_cy is not None and current_trace_idx < len(trace_points):
                     
-                    trace_update_counter += 1 # 每帧计数 +1
+                    trace_update_counter += 1 
                     
-                    # 🌟 彻底干掉 Lookahead 和 NearestIdx！就死死盯住当前这个点！
                     target_idx = min(current_trace_idx, len(trace_points) - 1)
                     goal_x, goal_y = trace_points[target_idx]
                     
@@ -178,30 +173,55 @@ def main():
                     err_x = max(-45.0, min(45.0, err_x))
                     err_y = max(-45.0, min(45.0, err_y))
                     
+                    # ========================================================
+                    # 🌟 优化4 & 5：【拐角动态识别与降速】(封神之举)
+                    # ========================================================
+                    threshold = 15.0  # 默认直线门槛
+                    gain = 0.8        # 默认直线增益
+                    
+                    # 侦测前方道路是否出现拐角
+                    if current_trace_idx < len(trace_points) - 3:
+                        p1 = trace_points[current_trace_idx]
+                        p2 = trace_points[current_trace_idx + 1]
+                        p3 = trace_points[current_trace_idx + 2]
+                        
+                        v1 = (p2[0] - p1[0], p2[1] - p1[1])
+                        v2 = (p3[0] - p2[0], p3[1] - p2[1])
+                        
+                        # 叉乘法计算向量方向的突变程度
+                        angle_change = abs(v1[0]*v2[1] - v1[1]*v2[0])
+                        
+                        if angle_change > 20: 
+                            threshold = 25.0  # 拐角处：放宽门槛，提前切入下一个点 (Fly-by 倒角过渡)
+                            gain = 0.5        # 拐角处：大幅降低增益，温柔降速过弯！
+                            
+                            # 在画面上标出识别到的拐角，方便你调试
+                            cv2.putText(display_frame, "CORNER SLOWDOWN!", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 3)
+
                     last_laser_cx, last_laser_cy = laser_cx, laser_cy 
                     last_err_x, last_err_y = err_x, err_y
                     lost_counter = 0
                     
-                    # 🌟 恢复 0.8 输出，不要太软也不要太猛
-                    serial_manager.send_gimbal_data(err_x * 0.8, err_y * 0.8, state=1)
+                    # 下发指令 (此时 gain 已经自动适应了直线还是拐弯)
+                    serial_manager.send_gimbal_data(err_x * gain, err_y * gain, state=1)
                     
                     # 画图
                     for i, p in enumerate(trace_points):
                         if i < current_trace_idx: cv2.circle(display_frame, p, 1, (100, 100, 100), -1)
                         elif i == current_trace_idx:
-                            cv2.circle(display_frame, p, 3, (0, 0, 255), -1) # 当前目标点画大一点
+                            cv2.circle(display_frame, p, 3, (0, 0, 255), -1) 
                     
                     cv2.circle(display_frame, (int(goal_x), int(goal_y)), 6, (0, 255, 255), -1)
                     cv2.line(display_frame, (laser_cx, laser_cy), (int(goal_x), int(goal_y)), (0, 255, 255), 1)
                     
                     # ========================================================
-                    # 🌟 终极妥协机制：< 15 像素 + 每 3 帧才允许推进一次！
-                    # 强迫代码等待舵机，绝不提前开溜！
+                    # 🌟 优化3：推进帧数降到 2 帧，消除停顿感！
+                    # 并带入刚才动态计算的 threshold！
                     # ========================================================
                     current_dist = math.hypot(goal_x - laser_cx, goal_y - laser_cy)
-                    if current_dist < 15.0 and trace_update_counter >= 3:
+                    if current_dist < threshold and trace_update_counter >= 2:
                         current_trace_idx += 1 
-                        trace_update_counter = 0 # 推进后重新计时
+                        trace_update_counter = 0 
                         
                     if current_trace_idx >= len(trace_points):
                         trace_points = []
