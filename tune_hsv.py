@@ -29,15 +29,11 @@ def main():
         s_min = cv2.getTrackbarPos("S_MIN", "HSV Tuner")
         v_min = cv2.getTrackbarPos("V_MIN", "HSV Tuner")
 
-        # 实时生成红光遮罩
-        lower_red1 = np.array([0, s_min, v_min])
-        upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([160, s_min, v_min])
-        upper_red2 = np.array([180, 255, 255])
-
-        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-        laser_mask = cv2.bitwise_or(mask1, mask2)
+        # 绿色的大致范围，S下限依然要调低(比如40)防止绿激光中心过曝变白漏抓
+        lower_green = np.array([35, s_min, v_min])
+        upper_green = np.array([85, 255, 255])
+        laser_mask = cv2.inRange(hsv, lower_green, upper_green)
+        # 删掉 mask2 和 bitwise_or 的逻辑
         
         # 加上膨胀效果，模拟真实运行情况
         kernel = np.ones((5, 5), np.uint8)
