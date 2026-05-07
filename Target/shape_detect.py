@@ -1,7 +1,8 @@
 import cv2
 import numpy as np
 import math
-_last_otsu_thresh=-1
+_last_otsu_thresh = -1
+
 def detect_laser(frame):
     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
@@ -39,29 +40,24 @@ def process_shapes(frame, mode):
     results = []
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    # 🌟 优化1：把模糊核降到 3x3，保护多边形的“尖角”不被盘圆！
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     
     # ==========================================
     # 🌟 绝杀边框晃动：阈值平滑器！
     # ==========================================
     global _last_otsu_thresh
     
-    # 1. 先让大津法算出一个推荐值 (otsu_val)
     otsu_val, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
     
-    # 2. 如果是刚开机，就直接用这个值
     if _last_otsu_thresh == -1:
         _last_otsu_thresh = otsu_val
     else:
-        # 3. 核心魔法：老阈值占 0.9，新阈值占 0.1。过滤掉光线的微小闪烁！
         _last_otsu_thresh = _last_otsu_thresh * 0.9 + otsu_val * 0.1
         
-    # 4. 用过滤后极其稳定的阈值，来进行最终的黑白二值化
     _, thresh = cv2.threshold(blurred, int(_last_otsu_thresh), 255, cv2.THRESH_BINARY_INV)
 
-
-    
-    # 🌟 现场缝合术：把反光断裂的黑胶带重新黏合！
+    # 现场缝合术
     kernel_close = np.ones((5, 5), np.uint8) 
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close)
     
@@ -72,20 +68,18 @@ def process_shapes(frame, mode):
     # ==========================================
     if mode in [1, 4, 5]:
         max_area = 0
-        best_target_rect = None # 🌟 我们存矩形，不再存多边形
+        best_target_rect = None 
         
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 3000 or area > 150000: continue # 🌟 保护上限和下限，隔绝小图形和外界大阴影
+            if area < 3000 or area > 150000: continue 
             
-            # 🚨 终极防弹衣：不再数 approx 有没有 4 个角！直接算外接矩形！
             rect = cv2.minAreaRect(cnt)
             w, h = rect[1]
             if min(w, h) == 0: continue
             
             aspect_ratio = max(w, h) / min(w, h)
             
-            # 🌟 只要长宽比像个框（0.8 到 2.5 之间），哪怕胶带贴得像狗啃的也认！
             if 0.8 <= aspect_ratio <= 2.5:
                 if area > max_area:
                     max_area = area
@@ -136,15 +130,14 @@ def process_shapes(frame, mode):
     elif mode == 2 or mode == 3:
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # 🌟 限制面积
             if area < 800 or area > 10000: continue 
             
-            # 🌟 绝杀底边噪点：边缘剔除法！(只要靠近屏幕四边的，全扔掉)
             x, y, w, h = cv2.boundingRect(cnt)
-            if y + h > 478 or x <= 2 or x + w > 638 or y <=2:
+            if y + h > 478 or x <= 2 or x + w > 638 or y <= 2:
                 continue
                 
-            epsilon = 0.02 * cv2.arcLength(cnt, True)
+            # 🌟 优化2：逼近精度提高到 0.01！让五角星的尖角死死稳住！
+            epsilon = 0.01 * cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, epsilon, True)
             vertices = len(approx)
             perimeter = cv2.arcLength(cnt, True)
@@ -152,9 +145,8 @@ def process_shapes(frame, mode):
             
             circularity = (4 * np.pi * area) / (perimeter * perimeter)
             
-            # 赛题级排序逻辑
             if circularity > 0.78: 
-                shape_name, sort_key = "YuanXing", 0  # 圆形排第一
+                shape_name, sort_key = "YuanXing", 0
             else:
                 shape_name, sort_key = f"Shape_{vertices}", vertices
 
@@ -162,20 +154,16 @@ def process_shapes(frame, mode):
             if M["m00"] != 0:
                 cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
                 
-                # 🌟 绝杀 8 边形：画图逻辑因材施教！
                 if shape_name == "YuanXing":
-                    # 是圆形，就画极其平滑的数学圆！
                     (circle_x, circle_y), radius = cv2.minEnclosingCircle(cnt)
                     cv2.circle(display_frame, (int(circle_x), int(circle_y)), int(radius), (0, 255, 0), 2)
                     contour_points = cnt if mode == 3 else []
                 else:
-                    # 是多边形，才画折线！
                     cv2.drawContours(display_frame, [approx], -1, (0, 255, 0), 2)
                     contour_points = approx if mode == 3 else []
                     
                 results.append({'shape': shape_name, 'cx': cx, 'cy': cy, 'vertices': sort_key, 'contour': contour_points})
 
-        # 按边数升序排列
         results = sorted(results, key=lambda x: x['vertices'])
 
     return results, display_frame, thresh

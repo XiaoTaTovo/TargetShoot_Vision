@@ -1,5 +1,6 @@
 import cv2
 import math
+import numpy as np
 from Target.shape_detect import process_shapes, detect_laser
 from Serial.communicate import SerialManager 
 
@@ -22,7 +23,6 @@ def main():
     trace_points = []      
     current_trace_idx = 0  
     
-    # Codex 防抖状态量
     smooth_goal_x, smooth_goal_y = 0.0, 0.0 
     
     last_err_x, last_err_y = 0.0, 0.0
@@ -35,10 +35,7 @@ def main():
         ret, frame = cap.read()
         if not ret: break
         
-        # 1. 全局实时图形识别 (无视动态静态，永远保持最高警惕)
         results, display_frame, thresh = process_shapes(frame, current_mode)
-        
-        # 2. 全局实时激光识别
         laser_cx, laser_cy = detect_laser(frame)
         
         display_err_x, display_err_y = 0.0, 0.0
@@ -47,7 +44,6 @@ def main():
         if laser_cx is not None:
             cv2.drawMarker(display_frame, (laser_cx, laser_cy), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
 
-        # 3. 倾听单片机的物理按键指令 (脱机核心！)
         if serial_manager.ser is not None:
             while serial_manager.ser.in_waiting > 0:
                 try:
@@ -71,14 +67,13 @@ def main():
             target_index = 0 
 
         # ==========================================
-        # 🎯 任务 1, 2, 4, 5 逻辑 (静态+动态目标通吃！)
+        # 🎯 任务 1, 2, 4, 5 逻辑 (静态+动态目标)
         # ==========================================
         if current_mode in [1, 2, 4, 5]:
             if len(results) > 0 and target_index < len(results):
                 target = results[target_index]
                 current_target_name = target['shape'] 
                 
-                # 目标坐标低通滤波 (防止目标板抖动导致云台乱晃)
                 if smooth_tx == 0 and smooth_ty == 0:
                     smooth_tx, smooth_ty = target['cx'], target['cy']
                 else:
@@ -106,24 +101,27 @@ def main():
                 if current_mode == 2 and target_index > 0:
                     cv2.putText(display_frame, "MISSION 2 COMPLETED!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
 
-       # ==========================================
-        # 🎯 任务 3 逻辑 (高密度 + 零延迟直通)
+        # ==========================================
+        # 🎯 任务 3 逻辑 (高阶轨迹追踪)
         # ==========================================
         elif current_mode == 3: 
             current_target_name = "Tracing Mode"
             if len(results) > 0 and target_index < len(results):
                 target = results[target_index]
                 
+                # 1. 生成轨迹
                 if len(trace_points) == 0 and 'contour' in target and len(target['contour']) > 0:
                     trace_points = []
+                    cx, cy = target['cx'], target['cy']
+                    
+                    # 🌟 优化1：全场轮廓强制内缩 15%，完美走在黑带中间！
+                    shrink_ratio = 0.90
                     
                     if target['shape'] == 'YuanXing':
-                        # 🌟 修复：直接对传过来的轮廓算最完美的纯粹数学圆！
-                        (cx_float, cy_float), radius_float = cv2.minEnclosingCircle(target['contour'])
-                        cx, cy, radius = int(cx_float), int(cy_float), int(radius_float)
+                        area = cv2.contourArea(target['contour'])
+                        # 🌟 半径缩减！
+                        radius = int(((area / 3.14159) ** 0.5) * shrink_ratio)
                         
-                        # 🌟 把 720 份降级为 72 份（每 5 度一个点）。
-                        # 舵机根本反应不过来 720 份，太密只会导致死机和疯狂卡顿！
                         for i in range(72):
                             angle = i * (2 * 3.14159 / 72)
                             x = int(cx + radius * math.cos(angle))
@@ -132,34 +130,47 @@ def main():
                     
                     else:
                         vertices = target['contour']
-                        for i in range(len(vertices)):
-                            pt1 = vertices[i][0]
-                            pt2 = vertices[(i+1) % len(vertices)][0] 
+                        
+                        # 🌟 优化2：顶点坐标重排，永远强制从左上角起步！
+                        pts = [p[0] for p in vertices]
+                        start_idx = np.argmin([p[0] + p[1] for p in pts])
+                        vertices = np.roll(vertices, -start_idx, axis=0)
+
+                        # 🌟 把顶点按 shrink_ratio 向中心收缩！
+                        shrunk_vertices = []
+                        for pt in vertices:
+                            vx, vy = pt[0]
+                            new_x = int(cx + (vx - cx) * shrink_ratio)
+                            new_y = int(cy + (vy - cy) * shrink_ratio)
+                            shrunk_vertices.append([[new_x, new_y]])
+                            
+                        # 画线
+                        for i in range(len(shrunk_vertices)):
+                            pt1 = shrunk_vertices[i][0]
+                            pt2 = shrunk_vertices[(i+1) % len(shrunk_vertices)][0] 
                             dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
-                            # 🌟 直线也切密一点，每 1.5 像素一个点
+                            
                             steps = max(int(dist / 1.5), 5) 
                             for j in range(steps):
                                 x = int(pt1[0] + (pt2[0] - pt1[0]) * (j / float(steps)))
                                 y = int(pt1[1] + (pt2[1] - pt1[1]) * (j / float(steps)))
                                 trace_points.append((x, y))
-                            for _ in range(20): # 拐角停车时间稍微缩短一点
-                                trace_points.append((int(pt2[0]), int(pt2[1])))
+                            
+                            # 🌟 优化3：删掉了此处人工停车的 20 个废点，过弯将一气呵成！
                                 
                     current_trace_idx = 0
                     
                 # 2. 追踪逻辑
                 if laser_cx is not None and laser_cy is not None and current_trace_idx < len(trace_points):
                     
-                    # 🌟 修复2：因为点变密了（720份），前瞻步数必须同步放大！否则等于没前瞻！
-                    lookahead_steps = 25  # 建议设在 20 到 30 之间
+                    lookahead_steps = 18  # 适当的前瞻
                     target_idx = min(current_trace_idx + lookahead_steps, len(trace_points) - 1)
                     goal_x, goal_y = trace_points[target_idx]
                     
-                    # 🌟 修复3：直接干掉低通滤波！数学轨迹不需要滤波！
                     err_x = goal_x - laser_cx
                     err_y = goal_y - laser_cy
                     
-                    if abs(err_x) < 1.0: err_x = 0.0 # 死区也缩小到 1.0
+                    if abs(err_x) < 1.0: err_x = 0.0 
                     if abs(err_y) < 1.0: err_y = 0.0
 
                     err_x = max(-45.0, min(45.0, err_x))
@@ -170,10 +181,9 @@ def main():
                     lost_counter = 0
                     display_err_x, display_err_y = err_x, err_y
                     
-                    # 直接下发
                     serial_manager.send_gimbal_data(err_x * 0.9, err_y * 0.9, state=1)
                     
-                    # 画图（把你的黄点正确地画在 goal_x 上）
+                    # 画图
                     for i, p in enumerate(trace_points):
                         if i < current_trace_idx: cv2.circle(display_frame, p, 1, (100, 100, 100), -1)
                         elif i == current_trace_idx:
@@ -182,9 +192,9 @@ def main():
                     cv2.circle(display_frame, (int(goal_x), int(goal_y)), 6, (0, 255, 255), -1)
                     cv2.line(display_frame, (laser_cx, laser_cy), (int(goal_x), int(goal_y)), (0, 255, 255), 1)
                     
-                    # 🌟 修复4：把容忍度放回健康的 12.0
+                    # 🌟 优化4：放宽推进阈值，彻底解决圆画到一半卡死的问题！
                     current_dist = math.hypot(goal_x - laser_cx, goal_y - laser_cy)
-                    if current_dist < 10.0:
+                    if current_dist < 15.0:
                         current_trace_idx += 1 
                         
                     if current_trace_idx >= len(trace_points):
@@ -192,6 +202,7 @@ def main():
                         target_index += 1
                         
                 else: 
+                    # 丢失追踪时的应急盲走
                     if lost_counter < 30 and current_trace_idx < len(trace_points):
                         lost_counter += 1
                         if lost_counter % 3 == 0:
@@ -216,7 +227,6 @@ def main():
         cv2.imshow("Camera View (AI)", display_frame)
         if thresh is not None: cv2.imshow("Binary View (Debug)", thresh)
         
-        # 即使脱机，也保留 q 键退出，方便你插显示器调试
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): break
 
